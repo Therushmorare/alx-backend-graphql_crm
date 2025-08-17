@@ -1,144 +1,98 @@
 import graphene
 from graphene_django import DjangoObjectType
+from graphene_django.filter import DjangoFilterConnectionField
 from .models import Customer, Product, Order
 from django.db import transaction
 from django.core.exceptions import ValidationError
 import re
 from datetime import datetime
+import django_filters
 
-# --- GraphQL Types ---
+# -----------------------------
+# GraphQL Types
+# -----------------------------
 class CustomerType(DjangoObjectType):
     class Meta:
         model = Customer
+        fields = "__all__"
+
 
 class ProductType(DjangoObjectType):
     class Meta:
         model = Product
+        fields = "__all__"
+
 
 class OrderType(DjangoObjectType):
     class Meta:
         model = Order
+        fields = "__all__"
+
+# -----------------------------
+# Filters
+# -----------------------------
+class CustomerFilter(django_filters.FilterSet):
+    name_icontains = django_filters.CharFilter(field_name="name", lookup_expr="icontains")
+    email_icontains = django_filters.CharFilter(field_name="email", lookup_expr="icontains")
+    created_at_gte = django_filters.DateFilter(field_name="created_at", lookup_expr="gte")
+    created_at_lte = django_filters.DateFilter(field_name="created_at", lookup_expr="lte")
+    phone_pattern = django_filters.CharFilter(method="filter_phone_pattern")
+
+    class Meta:
+        model = Customer
+        fields = ["name_icontains", "email_icontains", "created_at_gte", "created_at_lte", "phone_pattern"]
+
+    def filter_phone_pattern(self, queryset, name, value):
+        return queryset.filter(phone__startswith=value)
 
 
-# --- Mutations ---
+class ProductFilter(django_filters.FilterSet):
+    name_icontains = django_filters.CharFilter(field_name="name", lookup_expr="icontains")
+    price_gte = django_filters.NumberFilter(field_name="price", lookup_expr="gte")
+    price_lte = django_filters.NumberFilter(field_name="price", lookup_expr="lte")
+    stock_gte = django_filters.NumberFilter(field_name="stock", lookup_expr="gte")
+    stock_lte = django_filters.NumberFilter(field_name="stock", lookup_expr="lte")
+    low_stock = django_filters.BooleanFilter(method="filter_low_stock")
 
-# 1. CreateCustomer
-class CreateCustomer(graphene.Mutation):
-    class Arguments:
-        name = graphene.String(required=True)
-        email = graphene.String(required=True)
-        phone = graphene.String(required=False)
+    class Meta:
+        model = Product
+        fields = ["name_icontains", "price_gte", "price_lte", "stock_gte", "stock_lte", "low_stock"]
 
-    customer = graphene.Field(CustomerType)
-    message = graphene.String()
-
-    def mutate(self, info, name, email, phone=None):
-        # Validate email uniqueness
-        if Customer.objects.filter(email=email).exists():
-            raise ValidationError("Email already exists")
-
-        # Validate phone
-        if phone:
-            pattern = re.compile(r'^(\+\d{10,15}|\d{3}-\d{3}-\d{4})$')
-            if not pattern.match(phone):
-                raise ValidationError("Phone format invalid")
-
-        customer = Customer(name=name, email=email, phone=phone)
-        customer.save()
-        return CreateCustomer(customer=customer, message="Customer created successfully")
+    def filter_low_stock(self, queryset, name, value):
+        if value:
+            return queryset.filter(stock__lt=10)
+        return queryset
 
 
-# 2. BulkCreateCustomers
-class CustomerInput(graphene.InputObjectType):
-    name = graphene.String(required=True)
-    email = graphene.String(required=True)
-    phone = graphene.String(required=False)
+class OrderFilter(django_filters.FilterSet):
+    total_amount_gte = django_filters.NumberFilter(field_name="total_amount", lookup_expr="gte")
+    total_amount_lte = django_filters.NumberFilter(field_name="total_amount", lookup_expr="lte")
+    order_date_gte = django_filters.DateFilter(field_name="order_date", lookup_expr="gte")
+    order_date_lte = django_filters.DateFilter(field_name="order_date", lookup_expr="lte")
+    customer_name = django_filters.CharFilter(field_name="customer__name", lookup_expr="icontains")
+    product_name = django_filters.CharFilter(method="filter_by_product_name")
+    product_id = django_filters.NumberFilter(method="filter_by_product_id")
+
+    class Meta:
+        model = Order
+        fields = ["total_amount_gte", "total_amount_lte", "order_date_gte", "order_date_lte", "customer_name", "product_name", "product_id"]
+
+    def filter_by_product_name(self, queryset, name, value):
+        return queryset.filter(products__name__icontains=value).distinct()
+
+    def filter_by_product_id(self, queryset, name, value):
+        return queryset.filter(products__id=value).distinct()
 
 
-class BulkCreateCustomers(graphene.Mutation):
-    class Arguments:
-        input = graphene.List(CustomerInput, required=True)
-
-    customers = graphene.List(CustomerType)
-    errors = graphene.List(graphene.String)
-
-    def mutate(self, info, input):
-        customers = []
-        errors = []
-
-        for c in input:
-            try:
-                # Validate email uniqueness
-                if Customer.objects.filter(email=c.email).exists():
-                    raise ValidationError(f"Email {c.email} already exists")
-
-                # Validate phone
-                if c.phone:
-                    pattern = re.compile(r'^(\+\d{10,15}|\d{3}-\d{3}-\d{4})$')
-                    if not pattern.match(c.phone):
-                        raise ValidationError(f"Phone format invalid for {c.phone}")
-
-                customer = Customer(name=c.name, email=c.email, phone=c.phone)
-                customer.save()
-                customers.append(customer)
-            except ValidationError as e:
-                errors.append(str(e))
-
-        return BulkCreateCustomers(customers=customers, errors=errors)
+# -----------------------------
+# Mutations (keep your existing ones)
+# -----------------------------
+# ... [Include your CreateCustomer, BulkCreateCustomers, CreateProduct, CreateOrder classes here] ...
 
 
-# 3. CreateProduct
-class CreateProduct(graphene.Mutation):
-    class Arguments:
-        name = graphene.String(required=True)
-        price = graphene.Float(required=True)
-        stock = graphene.Int(required=False)
-
-    product = graphene.Field(ProductType)
-
-    def mutate(self, info, name, price, stock=0):
-        if price <= 0:
-            raise ValidationError("Price must be positive")
-        if stock < 0:
-            raise ValidationError("Stock cannot be negative")
-
-        product = Product(name=name, price=price, stock=stock)
-        product.save()
-        return CreateProduct(product=product)
-
-
-# 4. CreateOrder
-class CreateOrder(graphene.Mutation):
-    class Arguments:
-        customer_id = graphene.ID(required=True)
-        product_ids = graphene.List(graphene.ID, required=True)
-        order_date = graphene.String(required=False)
-
-    order = graphene.Field(OrderType)
-
-    def mutate(self, info, customer_id, product_ids, order_date=None):
-        try:
-            customer = Customer.objects.get(pk=customer_id)
-        except Customer.DoesNotExist:
-            raise ValidationError("Customer does not exist")
-
-        products = Product.objects.filter(id__in=product_ids)
-        if not products:
-            raise ValidationError("No valid products selected")
-
-        with transaction.atomic():
-            order = Order(customer=customer)
-            if order_date:
-                order.order_date = datetime.fromisoformat(order_date)
-            order.save()  # Save first to generate ID for M2M
-            order.products.set(products)
-            order.total_amount = sum([p.price for p in products])
-            order.save()
-
-        return CreateOrder(order=order)
-
-
-# --- Mutation Class ---
+# -----------------------------
+# Mutation Class
+# -----------------------------
 class Mutation(graphene.ObjectType):
     create_customer = CreateCustomer.Field()
     bulk_create_customers = BulkCreateCustomers.Field()
@@ -146,8 +100,16 @@ class Mutation(graphene.ObjectType):
     create_order = CreateOrder.Field()
 
 
-# --- Query Class ---
+# -----------------------------
+# Query Class with Filters
+# -----------------------------
 class Query(graphene.ObjectType):
+    # Filtered connections
+    all_customers = DjangoFilterConnectionField(CustomerType, filterset_class=CustomerFilter)
+    all_products = DjangoFilterConnectionField(ProductType, filterset_class=ProductFilter)
+    all_orders = DjangoFilterConnectionField(OrderType, filterset_class=OrderFilter)
+
+    # Simple list queries
     customers = graphene.List(CustomerType)
     products = graphene.List(ProductType)
     orders = graphene.List(OrderType)
